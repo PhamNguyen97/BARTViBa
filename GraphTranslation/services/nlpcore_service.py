@@ -121,15 +121,17 @@ class SrcNLPCoreService(NLPCoreService):
         new_words.sort(key=lambda w: w.begin)
         for i in range(len(new_words)):
             if i > 0:
-                new_words[i].pre = new_words[i-1]
-                new_words[i-1].next = new_words[i]
+                new_words[i].pre = new_words[i - 1]
+                new_words[i - 1].next = new_words[i]
             if i < len(new_words) - 1:
-                new_words[i].next = new_words[i+1]
-                new_words[i+1].pre = new_words[i]
+                new_words[i].next = new_words[i + 1]
+                new_words[i + 1].pre = new_words[i]
 
         return new_words
 
     def word_segmentation(self, text):
+        if text[-1] not in "?.:!":
+            text += "."
         words = self._annotate(text)
         words = self.combine_ner(words)
         words = self.combine_words(text, words)
@@ -195,9 +197,9 @@ class DstNLPCoreService(NLPCoreService):
         mask = [False] * len(syllables)
         for n_gram in range(len(syllables), 0, -1):
             for i in range(len(syllables) - n_gram + 1):
-                sub_word = " ".join(syllables[i:i+n_gram])
+                sub_word = " ".join(syllables[i:i + n_gram])
                 if sub_word.isnumeric() or self.custom_ner.get(sub_word) == NUM:
-                    mask = mask[:i] + [True] * n_gram + mask[i+n_gram:]
+                    mask = mask[:i] + [True] * n_gram + mask[i + n_gram:]
         return False not in mask
 
     def combine_number_tags(self, sentence: Sentence):
@@ -211,8 +213,14 @@ class DstNLPCoreService(NLPCoreService):
                     new_words.append(w)
                 else:
                     pre_word = new_words[-1]
-                    new_word = SentWord(text=f"{pre_word.original_text} {w.original_text}", begin=pre_word.begin, end=w.end,
-                                        language=pre_word.language, pos=pre_word.pos, ner_label=NUM)
+                    new_word = SentWord(
+                        text=f"{pre_word.original_text} {w.original_text}",
+                        begin=pre_word.begin,
+                        end=w.end,
+                        language=pre_word.language,
+                        pos=pre_word.pos,
+                        ner_label=NUM
+                    )
                     new_word.pre = pre_word
                     new_word.next = w.next
                     new_word.pre.next = new_word
@@ -249,7 +257,7 @@ class DstNLPCoreService(NLPCoreService):
                         end -= 1
                         words.append(SentWord(text=original_text[begin:end], begin=begin - 1, end=end - 1,
                                               language=self.language, pos=None))
-                        text_ = text_[:begin] + " "*(end - begin) + text_[end:]
+                        text_ = text_[:begin] + " " * (end - begin) + text_[end:]
         not_mapped_words = set(text_.split())
         for candidate in not_mapped_words:
             candidate = f" {candidate} "
@@ -339,7 +347,7 @@ class SyllableBasedDstNLPCoreService(DstNLPCoreService):
             text = text.replace(c, " ")
         text_ = ""
         for i in range(len(text)):
-            if i < len(text) - 1 and text[i] in string.digits and text[i+1] not in string.digits:
+            if i < len(text) - 1 and text[i] in string.digits and text[i + 1] not in string.digits:
                 text_ += text[i] + " "
             else:
                 text_ += text[i]
@@ -350,7 +358,7 @@ class SyllableBasedDstNLPCoreService(DstNLPCoreService):
         words = []
         s = 0
         for i, w in enumerate(text.split()):
-            words.append(SentWord(text=w, language=self.language, begin=s, end=s+len(w), pos=None, index=i))
+            words.append(SentWord(text=w, language=self.language, begin=s, end=s + len(w), pos=None, index=i))
             s += len(w) + 1
         return words
 
@@ -370,6 +378,7 @@ class SyllableBasedDstNLPCoreService(DstNLPCoreService):
                 ner_candidates.append(word)
             elif len(ner_candidates) > 0:
                 new_word = SentCombineWord([s for w in ner_candidates for s in w.syllables])
+                new_word.ner_label = NUM
                 new_words.append(new_word)
                 ner_candidates = []
         sentence.build_tree(new_words)
@@ -425,6 +434,9 @@ class CombinedSrcNLPCoreService(SyllableBasedSrcNLPCoreService):
 class TranslationNLPCoreService(BaseServiceSingleton):
     def __init__(self, is_train=False):
         super(TranslationNLPCoreService, self).__init__()
+        self._external_src_core_nlp = SrcNLPCoreService()
+        self._base_src_core_nlp = SyllableBasedSrcNLPCoreService()
+        self._is_train = is_train
         self.src_service = SyllableBasedSrcNLPCoreService() if is_train else SrcNLPCoreService()
         self.dst_service = SyllableBasedDstNLPCoreService()
         self.src_dict_based_service = SyllableBasedSrcNLPCoreService()
@@ -438,9 +450,15 @@ class TranslationNLPCoreService(BaseServiceSingleton):
         else:
             return self.dst_service.annotate(text)
 
-    def annotate(self, text, language: Languages = Languages.SRC) -> Sentence:
+    def annotate(self, text, language: Languages = Languages.SRC, is_train: bool = None) -> Sentence:
         if language == Languages.SRC:
-            return self.src_service(text)
+            if is_train is not None:
+                if is_train:
+                    return self._base_src_core_nlp(text)
+                else:
+                    return self._external_src_core_nlp(text)
+            else:
+                return self.src_service(text)
         else:
             return self.dst_service(text)
 
@@ -448,7 +466,8 @@ class TranslationNLPCoreService(BaseServiceSingleton):
 if __name__ == "__main__":
     nlpcore_service = TranslationNLPCoreService()
     dst_sentence_ = nlpcore_service.annotate("minh jĭt pơđăm", Languages.DST)
-    src_sentence_ = nlpcore_service.word_segmentation("kể từ khi có trạm xá, nơi nhộn nhịp là thành phố Hồ Chí Minh", Languages.SRC)
+    src_sentence_ = nlpcore_service.word_segmentation("kể từ khi có trạm xá, nơi nhộn nhịp là thành phố Hồ Chí Minh",
+                                                      Languages.SRC)
     # print(dst_sentence_.info)
     # print(src_sentence_.info)
     for w in src_sentence_:

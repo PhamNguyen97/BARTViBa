@@ -6,10 +6,10 @@ import time
 
 
 class Translator(BaseServiceSingleton):
-    def __init__(self):
+    def __init__(self, is_train=False):
         super(Translator, self).__init__()
         self.model_translator = ModelTranslator()
-        self.graph_translator = TranslationPipeline()
+        self.graph_translator = TranslationPipeline(is_train=is_train)
         self.graph_translator.eval()
 
     @staticmethod

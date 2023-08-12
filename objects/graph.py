@@ -415,7 +415,7 @@ class SentWord(Word):
     def info(self):
         return {
             "id": self.id,
-            "text": self.text,
+            "text": self.original_upper,
             "begin": self.begin,
             "end": self.end,
             "pre": self.pre_word,
@@ -1415,6 +1415,9 @@ class SyllableBasedSentence(Sentence):
                 w.children.sort(key=lambda item: item.index)
 
         self._words = [w for w in all_words if w.parent is None]
+        self._words = list({
+            w.index: w for w in self.words
+        }.values())
         self._words.sort(key=lambda item: item.index)
 
     @property
@@ -1458,7 +1461,6 @@ class TranslationGraph(Graph):
         self.load_words(dst_sent)
         self._co_occurrence_relations = None
         self.check_valid_anchor = (lambda x: True) if check_valid_anchor is None else check_valid_anchor
-        print()
 
     def update_src_sentence(self):
         if self.src_sent is not None:
@@ -1517,8 +1519,13 @@ class TranslationGraph(Graph):
                         info_relation = Relation.get_class(RelationTypes.TRANSLATE)(src_node, dst_node)
                         src_text = src_child_word.original_text
                         dst_text = dst_child_word.original_text
-                        if info_relation in self or (word_distance(src_text, dst_text, mode="hamming") <= 2 and
-                                                     src_text[0] == dst_text[0]):
+                        if (
+                                info_relation in self or
+                                (
+                                        word_distance(src_text, dst_text, mode="hamming") <= 2 and
+                                        src_text[0] == dst_text[0]
+                                )
+                        ):
                             relation = Relation.get_class(RelationTypes.MAPPING)(src_child_word, dst_child_word)
                             pos_diff = src_child_word.begin_index - dst_child_word.begin_index
                             relations.append(relation)

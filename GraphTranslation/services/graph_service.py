@@ -106,7 +106,7 @@ class GraphService(BaseServiceSingleton):
                             if i == len(sentence) - 1:
                                 break
                             for src_child in src_sent_word.all_children:
-                                for j in range(i+1, min(i + 1 + self.config.bow_window_size, len(sentence))):
+                                for j in range(i + 1, min(i + 1 + self.config.bow_window_size, len(sentence))):
                                     dst_sent_word = sentence[j]
                                     for dst_child in dst_sent_word.all_children:
                                         src_word = self.graph.add_word(src_child.to_word())
@@ -149,12 +149,20 @@ class GraphService(BaseServiceSingleton):
         dst_sentence = self.nlp_core_service.annotate(text=dst_text, language=Languages.DST)
         src_sentence = self.add_info_node(src_sentence)
         dst_sentence = self.add_info_node(dst_sentence)
-        translation_graph = TranslationGraph(src_sent=src_sentence, dst_sent=dst_sentence,
-                                             check_valid_anchor=self.check_valid_anchor)
+        translation_graph = TranslationGraph(
+            src_sent=src_sentence,
+            dst_sent=dst_sentence,
+            check_valid_anchor=self.check_valid_anchor
+        )
         translation_graph, extra_relations = self.find_anchor_parallel(translation_graph)
-        [self.graph.update_relation_count(Relation.convert_relation_type(r, RelationTypes.TRANSLATE))
-         for r in translation_graph.mapping_relations]
-        [self.graph.update_relation_count(r) for r in extra_relations]
+        [
+            self.graph.update_relation_count(Relation.convert_relation_type(r, RelationTypes.TRANSLATE))
+            for r in translation_graph.mapping_relations
+        ]
+        [
+            self.graph.update_relation_count(r)
+            for r in extra_relations
+        ]
         mapped_chunks = translation_graph.mapped_chunks
         if len(mapped_chunks) > 0:
             src_chunks, dst_chunks = list(map(list, zip(*mapped_chunks)))
@@ -272,12 +280,16 @@ class GraphService(BaseServiceSingleton):
             src_word = src_sent[i]
             min_pos_diff = None
             candidate = None
-            for j in range(max(0, src_word.begin_index - max_pos_diff), min(len(dst_sent), src_word.end_index + max_pos_diff)):
+            for j in range(max(0, src_word.begin_index - max_pos_diff),
+                           min(len(dst_sent), src_word.end_index + max_pos_diff)):
                 dst_word = dst_sent.get_word_by_syllable_index(j)
                 if dst_word is None:
                     continue
-                _mapping_relations, _pos_diffs, update_src_words, update_dst_words = translation_graph.create_mapping_relation(src_word, dst_word)
-                # candidate = translation_graph.create_mapping_relation(src_word, dst_word)
+                _mapping_relations, _pos_diffs, update_src_words, update_dst_words = \
+                    translation_graph.create_mapping_relation(
+                        src_word=src_word,
+                        dst_word=dst_word
+                    )
                 if len(_pos_diffs) > 0:
                     mean_pos_diff = abs(np.mean(_pos_diffs))
                     if min_pos_diff is None or mean_pos_diff < min_pos_diff:
@@ -311,9 +323,10 @@ class GraphService(BaseServiceSingleton):
             if mean_pos_diff - 3 * std_pos_diff <= pos_diffs[i] <= mean_pos_diff + 3 * std_pos_diff:
                 current_relation = mapping_relations[i]
                 if len(final_mapping_relations) > 0 and \
-                    (current_relation.dst.begin_index <= final_mapping_relations[-1].dst.begin_index or
-                     current_relation.src.begin_index == final_mapping_relations[-1].src.begin_index):
-                    last_pos_diff = abs(final_mapping_relations[-1].dst.begin_index - final_mapping_relations[-1].src.begin_index)
+                        (current_relation.dst.begin_index <= final_mapping_relations[-1].dst.begin_index or
+                         current_relation.src.begin_index == final_mapping_relations[-1].src.begin_index):
+                    last_pos_diff = abs(
+                        final_mapping_relations[-1].dst.begin_index - final_mapping_relations[-1].src.begin_index)
                     current_pos_diff = abs(current_relation.dst.begin_index - current_relation.src.begin_index)
                     if last_pos_diff > current_pos_diff:
                         final_mapping_relations[-1] = current_relation
@@ -324,8 +337,8 @@ class GraphService(BaseServiceSingleton):
         combine_candidates = []
         for i in range(len(final_mapping_relations) - 1):
             current_relation = final_mapping_relations[i]
-            next_relation = final_mapping_relations[i+1]
-            if current_relation.src.begin_index == next_relation.src.begin_index - 1\
+            next_relation = final_mapping_relations[i + 1]
+            if current_relation.src.begin_index == next_relation.src.begin_index - 1 \
                     and current_relation.dst.begin_index == next_relation.dst.begin_index - 1:
                 if len(combine_candidates) == 0 or current_relation not in combine_candidates[-1]:
                     combine_candidates.append([current_relation])
@@ -337,7 +350,7 @@ class GraphService(BaseServiceSingleton):
                 for j in range(len(combine_relations) - i + 1):
                     src_words = []
                     dst_words = []
-                    for r in combine_relations[j:j+i]:
+                    for r in combine_relations[j:j + i]:
                         src_words.append(r.src)
                         dst_words.append(r.dst)
                     src_text = " ".join(w.original_text for w in src_words)
@@ -350,7 +363,7 @@ class GraphService(BaseServiceSingleton):
             # elif len(combine_candidates) == 0 or len(combine_candidates[-1]) != 0:
             #     combine_candidates.append([])
 
-        self.logger.debug(translation_graph.translated_graph)
+        # self.logger.debug(translation_graph.translated_graph)
         return translation_graph, combinations
 
     def find_anchor_parallel_(self, translation_graph: TranslationGraph):
@@ -365,7 +378,8 @@ class GraphService(BaseServiceSingleton):
             src_word = src_sent[i]
             for j in range(max(0, i - max_pos_diff), min(len(dst_sent), i + max_pos_diff)):
                 dst_word = dst_sent[j]
-                _mapping_relations, _pos_diffs, update_src_words, update_dst_words = translation_graph.create_mapping_relation(src_word, dst_word)
+                _mapping_relations, _pos_diffs, update_src_words, update_dst_words = translation_graph.create_mapping_relation(
+                    src_word, dst_word)
                 if len(_pos_diffs) > 0:
                     pos_diffs += _pos_diffs
                     mapping_relations += _mapping_relations
@@ -400,5 +414,3 @@ class GraphService(BaseServiceSingleton):
 if __name__ == "__main__":
     graph_service = GraphService()
     print(graph_service.graph.next_graph)
-
-

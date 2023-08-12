@@ -10,3 +10,4 @@ __pycache__
 logs
 checkpoint
 data/cache
+data/ner
