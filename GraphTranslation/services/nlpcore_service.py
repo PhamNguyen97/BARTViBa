@@ -8,16 +8,19 @@ from vncorenlp import VnCoreNLP
 from GraphTranslation.common.languages import Languages
 from GraphTranslation.common.ner_labels import *
 from objects.graph import SentWord, Sentence, SyllableBasedSentence, SentCombineWord
-from GraphTranslation.services.base_service import BaseServiceSingletonWithCache, BaseServiceSingleton
+from GraphTranslation.services.base_service import BaseServiceSingleton
 from GraphTranslation.utils.utils import check_number
 
+import re
+# import conjunction
 
 class NLPCoreService(BaseServiceSingleton):
-    def __init__(self):
-        super(NLPCoreService, self).__init__()
-        self.word_set = set()
+    def __init__(self,area):
+        super(NLPCoreService, self).__init__(area)
+        self.word_set = set() # ===> Load được trong config.py
         self.max_gram = self.config.max_gram
         self.custom_ner = {}
+        self.area = area
 
     @staticmethod
     def check_number(text):
@@ -25,7 +28,8 @@ class NLPCoreService(BaseServiceSingleton):
 
     def add_custom_ner(self, sentence: Sentence) -> Sentence:
         for w in sentence.words:
-            if w.original_text in self.custom_ner:
+            self.custom_ner = self.custom_ner
+            if w.original_text in self.custom_ner.values():
                 w.ner_label = self.custom_ner[w.text]
             elif self.check_number(w.original_text):
                 w.ner_label = NUM
@@ -43,8 +47,8 @@ class NLPCoreService(BaseServiceSingleton):
         raise NotImplementedError("Not Implemented")
 
     def annotate(self, text) -> Sentence:
-        sentence = self.word_segmentation(text)
-        sentence = self.add_custom_ner(sentence)
+        sentence = self.word_segmentation(text) # Tạo ra 1 object Sentence chứa các sentWord đã được cắt theo dictionary, NER và token
+        sentence = self.add_custom_ner(sentence) # Gán TAG "ENT" hoặc "NUM" cho các từng sentWord
         sentence.update()
         return sentence
 
@@ -53,12 +57,18 @@ class NLPCoreService(BaseServiceSingleton):
 
 
 class SrcNLPCoreService(NLPCoreService):
-    def __init__(self):
-        super(SrcNLPCoreService, self).__init__()
+    def __init__(self, area):
+        super(SrcNLPCoreService, self).__init__(area)
+        self.area = area
         self.nlpcore_connector = VnCoreNLP(address=self.config.vncorenlp_host, port=self.config.vncorenlp_port,
                                            annotators="wseg,ner")
-        self.word_set = self.config.src_word_set
-        self.custom_ner = self.config.src_custom_ner
+        self.word_set = self.config.src_word_set(area)
+
+        self.viet2bana_dict = {}
+        for viet_word, bahnaric_word in self.config.src_dst_mapping(area): # with format set: (viet_word, bahnaric_word)
+            self.viet2bana_dict[viet_word] = bahnaric_word # Can help problem when 1 bahnaric word with multiple vietnamese words
+        
+        self.custom_ner = self.config.src_custom_ner()
 
     def word_n_grams(self, words, n):
         if len(words) == 0:
@@ -75,19 +85,40 @@ class SrcNLPCoreService(NLPCoreService):
         else:
             return super().word_n_grams(words, n)
 
+    # Use for checking the token is in dictionary or not (Old versions)
+    # def map_dictionary(self, text):
+    #     text = text.lower()
+    #     text = " ".join(word_tokenize(text))
+    #     text_ = f" {text} "
+    #     mapped_words = set()
+    #     for n_gram in range(self.max_gram, 0, -1):
+    #         syllables = word_tokenize(text_)
+    #         candidates = self.word_n_grams(syllables, n=n_gram)
+    #         for candidate in candidates:
+    #             if candidate in self.word_set:
+    #                 mapped_words.add(candidate)
+    #                 text_ = text_.replace(f" {candidate} ", "  ")
+
+    #     return mapped_words
+
+    # Use recursive to get the combination
     def map_dictionary(self, text):
         text = text.lower()
         text = " ".join(word_tokenize(text))
         text_ = f" {text} "
         mapped_words = set()
+
         for n_gram in range(self.max_gram, 0, -1):
             syllables = word_tokenize(text_)
             candidates = self.word_n_grams(syllables, n=n_gram)
             for candidate in candidates:
                 if candidate in self.word_set:
                     mapped_words.add(candidate)
-                    text_ = text_.replace(f" {candidate} ", "  ")
-        return mapped_words
+                    for subtext in text_.split(f" {candidate} "): mapped_words |= self.map_dictionary(subtext)
+                    return mapped_words
+                    
+        return set()
+
 
     @staticmethod
     def combine_ner(words: [SentWord]):
@@ -99,22 +130,33 @@ class SrcNLPCoreService(NLPCoreService):
                 new_words.append(w)
             else:
                 pre_word = new_words[-1]
-                new_word = SentWord(text=" ".join([pre_word.original_upper, w.original_upper]),
-                                    begin=pre_word.begin, end=w.end, language=w.language,
-                                    pos=pre_word.pos, ner_label=pre_word.ner_label)
+                if isinstance(pre_word, SentCombineWord):
+                    new_word = SentCombineWord([*pre_word.syllables, w])
+                else:
+                    new_word = SentCombineWord([pre_word, w])
+                # new_word = SentWord(text=" ".join([pre_word.original_upper, w.original_upper]),
+                #                     begin=pre_word.begin, end=w.end, language=w.language,
+                #                     pos=pre_word.pos, ner_label=pre_word.ner_label)
                 new_words[-1] = new_word
         return new_words
 
     def combine_words(self, text, words: [SentWord]):
-        mapped_words = self.map_dictionary(text)
+        mapped_words = self.map_dictionary(text) # Trích ra các token tồn tại trong dictionary
+        print("Word in dictionary:", mapped_words)
+
+        # Cắt lại các từ theo dictionary (Cắt lại token sao cho chúng có thể xuất hiện trong dictionary càng nhiều càng tốt)
         new_words = [w for w in words]
         for n_gram in range(self.max_gram, 0, -1):
-            candidates = self.word_n_grams(words, n=n_gram)
+            candidates = self.word_n_grams(words, n=n_gram) # Lấy ra combination của của các từ
             for candidate in candidates:
                 if candidate.text in mapped_words:
                     new_words = [w for w in new_words if w not in candidate]
+                    candidate.dst_word = self.viet2bana_dict[candidate.text]
                     new_words.append(candidate)
         new_words.sort(key=lambda w: w.begin)
+        # print("Word after sort:", [i.text for i in new_words])
+
+        # Gắn lại các pre word và next word cho từng SentWord
         for i in range(len(new_words)):
             if i > 0:
                 new_words[i].pre = new_words[i-1]
@@ -126,50 +168,141 @@ class SrcNLPCoreService(NLPCoreService):
         return new_words
 
     def word_segmentation(self, text):
-        words = self._annotate(text)
-        words = self.combine_ner(words)
+        words = self._annotate(text) # Tạo ra SentWord chứa thông tin từng token (NER, PRE, text, ...)
+        words = self.combine_ner(words) # Lấy lại các từ có NER là "O", "B-" hoặc NULL, còn các từ khác thì không
         words = self.combine_words(text, words)
+
         sent = Sentence(words)
         return sent
+    
+    # To filter the NER tokens and split all other token into word by word
+    def NER_filter(self, list_wseg):
+        # ner_label is not None and self.ner_label != "O"
+        if len(list_wseg) == 0:
+            return list_wseg
+
+        new_list = []
+        for token in list_wseg:
+            if token['nerLabel'] == "O":
+                for word in token['form'].split("_"):
+                    wordinfo = {key:value for key, value in token.items()}
+                    wordinfo['index'] = len(new_list) + 1
+                    wordinfo['form'] = word
+                    new_list.append(wordinfo)
+            else:
+                new_list.append(token)
+        
+        return new_list
+    
+    def split_punc(self, token):
+        # Define the pattern for splitting based on punctuation
+        pattern = r'([,."!?:]+|[^,."!?:]+)'
+
+        # Use re.findall to find all occurrences of the pattern in the token
+        split_string = re.findall(pattern, token)
+
+        result = []
+        for i in split_string:
+            if any([char in ',.:"!?' for char in i]): result += i
+            else: result += [i]
+
+        return result
+
+    def ba_annotate(self, paragraph):
+        output_list = []
+        format = {'index':0, 'form':"", 'posTag':"V", 'nerLabel':"O", 'head':0, 'depLabel':"root"}
+        for sentence in paragraph.split('.'):
+            sentence = sentence.strip()
+            temp_list = []
+
+            split_tokens = []
+            for token in [i for i in sentence.split(' ') if i != ""]:
+                split_tokens += self.split_punc(token)
+                
+            for idx, word in enumerate(split_tokens):
+                word_info = format.copy()
+                word_info['form'] = word
+                word_info['index'] = idx + 1
+                temp_list.append(word_info)
+            output_list.append(temp_list)
+        
+        # # loop items is output_list
+        # sentence_punc = ',.:"!?'
+        # for item in output_list:
+        #     # if form contains characters in sentece_punc --> seperate it into an output_list
+        #     if any([True for i in item if i['form'] in sentence_punc]):
+        #         temp_list = []
+        #         for idx, word in enumerate(item):
+        #             if word['form'] in sentence_punc:
+        #                 output_list.append(temp_list)
+        #                 temp_list = []
+        #             else:
+        #                 temp_list.append(word)
+        #         output_list.append(temp_list)
+        #         output_list.remove(item)
+        return output_list
 
     def _annotate(self, text):
-        text = text.strip()
-        for c in string.punctuation:
-            text = text.replace(c, f" {c} ")
+        if Languages.SRC == 'VI':
+            text = text.strip()
+            for c in string.punctuation:
+                text = text.replace(c, f" {c} ")
+
         while "\n\n" in text:
             text = text.replace("\n\n", "\n")
         paragraphs = text.split("\n")
+        
         if text[-1] not in "?.:!":
             text += "."
-        sentences = []
+        words = [{"form": "@", "nerLabel": "O", "posTag": "", "head": None, "index": 0}]
         for paragraph in paragraphs:
-            p_sentences = self.nlpcore_connector.annotate(text=paragraph)["sentences"]
-            p_sentences = [sentence + [{"form": "/@", "nerLabel": "O", "posTag": ""}] for sentence in p_sentences]
-            p_sentences.append([{"form": "//@", "nerLabel": "O", "posTag": ""}])
-            sentences += p_sentences
-        # sentences = self.nlpcore_connector.annotate(text=text)["sentences"]
-        words = [w for sentence in sentences for w in sentence]
-        out = [SentWord(text="@", begin=0, end=1, language=Languages.SRC, pos="")]
+            if Languages.SRC == 'VI':
+                p_sentences = self.nlpcore_connector.annotate(text=paragraph)["sentences"] # Trả về NER và posTag of each token
+            else:
+                p_sentences = self.ba_annotate(paragraph)
+
+            for sentence in p_sentences:
+                print("After segmentation: ", [f"{i['index']}:{i['form']}" for i in sentence])
+                if Languages.SRC == 'VI': 
+                    sentence = self.NER_filter(sentence)
+                print("After filter NER segmentation: ", [f"{i['index']}:{i['form']}" for i in sentence])
+
+                offset = len(words) - 1
+                for word in sentence:
+                    word["index"] += offset
+                    word["head"] += offset
+                    words.append(word)
+                words.append({"form": "/@", "nerLabel": "O", "posTag": "", "head": None, "index": len(words)})
+            words.append({"form": "//@", "nerLabel": "O", "posTag": "", "head": None, "index": len(words)})
+        out = []
         start = 2
+        word_dict = {}
         for w in words:
             text = w["form"]
             end = start + len(text)
             word = SentWord(text=w["form"].replace("_", " "), begin=start, end=end, language=Languages.SRC,
-                            pos=w.get("posTag", ""), ner_label=w["nerLabel"])
+                            pos=w.get("posTag", ""), ner_label=w["nerLabel"], head_id=w["head"],
+                            original_id=w["index"])
+            word_dict[word.original_id] = word
             if len(out) > 0:
                 word.pre = out[-1]
                 out[-1].next = word
             out.append(word)
             start = end + 1
+        for word in out:
+            if word.head_id is None:
+                continue
+            word.head = word_dict[word.head_id]
         return out
 
 
 class DstNLPCoreService(NLPCoreService):
-    def __init__(self):
-        super(DstNLPCoreService, self).__init__()
-        self.word_set = self.config.dst_word_set
-        self.custom_ner = self.config.dst_custom_ner
+    def __init__(self, area):
+        super(DstNLPCoreService, self).__init__(area)
+        self.word_set = self.config.dst_word_set(area)
+        self.custom_ner = self.config.dst_custom_ner()
         self.language = Languages.DST
+        self.area = area
 
     def check_number(self, text):
         syllables = word_tokenize(text)
@@ -209,7 +342,6 @@ class DstNLPCoreService(NLPCoreService):
         return output
 
     def word_segmentation(self, text):
-
         text = " ".join(word_tokenize(text))
         text = f" {text} "
         original_text = text
@@ -261,20 +393,21 @@ class DstNLPCoreService(NLPCoreService):
 
 
 class DictBasedSrcNLPCoreService(DstNLPCoreService):
-    def __init__(self):
-        super(DictBasedSrcNLPCoreService, self).__init__()
-        self.word_set = self.config.src_word_set
-        self.custom_ner = self.config.src_custom_ner
+    def __init__(self, area):
+        super(DictBasedSrcNLPCoreService, self).__init__(area)
+        self.word_set = self.config.src_word_set(area)
+        self.custom_ner = self.config.src_custom_ner()
         self.language = Languages.SRC
 
 
 class SyllableBasedDstNLPCoreService(DstNLPCoreService):
-    def __init__(self):
-        super(SyllableBasedDstNLPCoreService, self).__init__()
-        self.word_set = self.config.dst_word_set
-        self.custom_ner = self.config.dst_custom_ner
+    def __init__(self, area):
+        super(SyllableBasedDstNLPCoreService, self).__init__(area)
+        self.word_set = self.config.dst_word_set(area)
+        self.custom_ner = self.config.dst_custom_ner()
         self.language = Languages.DST
         self.punctuation_set = set(string.punctuation) - set("'")
+        self.area = area
 
     def map_dictionary(self, text):
         text = text.lower()
@@ -358,11 +491,12 @@ class SyllableBasedDstNLPCoreService(DstNLPCoreService):
 
 
 class SyllableBasedSrcNLPCoreService(SyllableBasedDstNLPCoreService):
-    def __init__(self):
-        super(SyllableBasedSrcNLPCoreService, self).__init__()
-        self.word_set = self.config.src_word_set
-        self.custom_ner = self.config.src_custom_ner
+    def __init__(self, area):
+        super(SyllableBasedSrcNLPCoreService, self).__init__(area)
+        self.word_set = self.config.src_word_set(area)
+        self.custom_ner = self.config.src_custom_ner()
         self.language = Languages.SRC
+        self.area = area
 
 
 class CombinedSrcNLPCoreService(SyllableBasedSrcNLPCoreService):
@@ -404,14 +538,15 @@ class CombinedSrcNLPCoreService(SyllableBasedSrcNLPCoreService):
 
 
 class TranslationNLPCoreService(BaseServiceSingleton):
-    def __init__(self, is_train=False):
-        super(TranslationNLPCoreService, self).__init__()
-        self.src_service = SyllableBasedSrcNLPCoreService() if is_train else SrcNLPCoreService()
-        self.dst_service = SyllableBasedDstNLPCoreService()
-        self.src_dict_based_service = SyllableBasedSrcNLPCoreService()
+    def __init__(self, area, is_train=False):
+        super(TranslationNLPCoreService, self).__init__(area)
+        self.src_service = SyllableBasedSrcNLPCoreService(area) if is_train else SrcNLPCoreService(area)
+        self.dst_service = SyllableBasedDstNLPCoreService(area)
+        self.src_dict_based_service = SyllableBasedSrcNLPCoreService(area)
+        self.area = area
 
     def eval(self):
-        self.src_service = SrcNLPCoreService()
+        self.src_service = SrcNLPCoreService(self.area)
 
     def word_segmentation(self, text, language: Languages = Languages.SRC):
         if language == Languages.SRC:
@@ -427,7 +562,7 @@ class TranslationNLPCoreService(BaseServiceSingleton):
 
 
 if __name__ == "__main__":
-    nlpcore_service = TranslationNLPCoreService()
+    nlpcore_service = TranslationNLPCoreService("BinhDinh")
     dst_sentence_ = nlpcore_service.annotate("minh jĭt pơđăm", Languages.DST)
     src_sentence_ = nlpcore_service.word_segmentation("kể từ khi có trạm xá, nơi nhộn nhịp là thành phố Hồ Chí Minh", Languages.SRC)
     # print(dst_sentence_.info)

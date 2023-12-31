@@ -7,10 +7,12 @@ import codecs
 from rank_bm25 import BM25Okapi
 import numpy as np
 
+from common.postag.conjunction import CONJUNCTION
 from GraphTranslation.utils.utils import norm_word, word_distance
 from GraphTranslation.common.languages import Languages
 from GraphTranslation.common.data_types import RelationTypes, NodeType
 from GraphTranslation.common.common_keys import *
+from GraphTranslation.config.config import Config
 
 
 class Word:
@@ -26,6 +28,10 @@ class Word:
         self.type = NodeType.GRAPH_WORD
         self._num_words = 0 if text is None else len(self._text.strip().split())
         self.index = 0
+
+    @property
+    def is_conjunction(self):
+        return self.text in CONJUNCTION
 
     @property
     def is_end_sign(self):
@@ -198,6 +204,8 @@ class Word:
         for r in self.out_relations.values():
             if r.type == RelationTypes.TRANSLATE:
                 output += f"({r.dst.text}:{r.dst.id}),"
+        if output[-1] == ",":
+            output = output[:-1]
         output += "]"
         return output
 
@@ -242,7 +250,7 @@ class Word:
             new_paths = []
             for path in paths:
                 new_paths += path.add_next_nodes(self.next_words)
-            paths = self.find_path(dst_node, depth-1, new_paths)
+            paths = self.find_path(dst_node, depth - 1, new_paths)
         return paths
 
     def contains(self, others):
@@ -298,10 +306,11 @@ class Word:
 
 class SentWord(Word):
     def __init__(self, text, language: Languages, begin=None, end=None, pos=None, ner_label=None, index=None,
-                 info_nodes=None, is_upper=None):
+                 info_nodes=None, is_upper=None, head_id=None, original_id=None):
         super(SentWord, self).__init__(text, language)
         if is_upper is not None:
             self.is_upper = is_upper
+        self.original_id = original_id
         self.index = begin if index is None else index
         self.begin = begin
         self.end = end
@@ -309,9 +318,13 @@ class SentWord(Word):
         self.pre = None
         self.pos = pos if pos is not None else ""
         self.ner_label = ner_label
+        self.head_id = head_id
         self.info_nodes: List[Word] = [] if info_nodes is None else info_nodes
         self.ner_node = None
+        self.head = None
         self.type = NodeType.SENT_WORD
+
+        self.dst_word = ""
 
     @property
     def original_upper(self):
@@ -361,11 +374,11 @@ class SentWord(Word):
 
     @property
     def begin_index(self):
-        return self.index
+        return self.begin
 
     @property
     def end_index(self):
-        return self.index
+        return self.end
 
     @property
     def is_end_sent(self):
@@ -401,7 +414,15 @@ class SentWord(Word):
 
     @property
     def is_punctuation(self):
-        return self.text in string.punctuation + "–"
+        return self.text in string.punctuation + "-"
+
+    @property # For checking the the word is conjunction or not because conjunction is base on dictionary
+    def is_conjunction(self):
+        return self.dst_word != ""
+
+    @property
+    def is_in_dictionary(self):
+        return self.dst_word != ""
 
     @property
     def info(self):
@@ -413,7 +434,8 @@ class SentWord(Word):
             "pre": self.pre_word,
             "next": self.next_word,
             "ner": self.ner_label,
-            "pos": self.pos
+            "pos": self.pos,
+            "mapped_word": self.dst_word
         }
 
     def __contains__(self, item):
@@ -442,6 +464,7 @@ class SentWord(Word):
         # print("MAPPING SCORE", self.text, mapping_relations)
         # return [r.dst for node in self.info_nodes for r in node.get_relation_by_type(RelationTypes.MAPPING)]
         # return [item[0] for item in translate_relations]
+
         return [r.dst for node in self.info_nodes for r in node.get_relation_by_type(RelationTypes.TRANSLATE)
                 if r.count > 0]
 
@@ -485,7 +508,9 @@ class SentWord(Word):
             for r in node.out_relations.values():
                 if r.type == RelationTypes.TRANSLATE:
                     output += f"({r.dst.text}:{r.dst.id}),"
-            output += "]"
+        if output[-1] == ",":
+            output = output[:-1]
+        output += "]"
         return output
 
 
@@ -501,6 +526,21 @@ class SentCombineWord(SentWord):
         self.parent = None
         self.children = []
         self.is_upper = syllables[0].is_upper
+
+    @property
+    def root(self):
+        out = self.syllables[0]
+        syllable_ids = [id(item) for item in self.syllables]
+        while id(out.head) in syllable_ids:
+            out = out.head
+        for syllable in self.syllables:
+            if id(syllable) != id(out) and id(syllable.head) == id(out.head):
+                return None
+        return out
+
+    @property
+    def original_upper(self):
+        return " ".join([item.original_upper for item in self.syllables])
 
     def get_child_combinations(self):
         output = []
@@ -714,6 +754,7 @@ class Graph:
         self.co_occurrence_index = None
         self.dst_n_gram_data = None
 
+
     def add_co_occurrence_corpus(self, data):
         src_n_gram_data, self.dst_n_gram_data = list(map(list, zip(*data)))
         self.co_occurrence_index = BM25Okapi(src_n_gram_data)
@@ -850,7 +891,8 @@ class Graph:
         return {
             WORDS: {key: word.dict for key, word in self.words.items()},
             RELATIONS: {key: relation.dict for key, relation in self.relations.items()},
-            CO_OCCURRENCE_INDEX: codecs.encode(pickle.dumps(self.co_occurrence_index, pickle.HIGHEST_PROTOCOL), "base64").decode(),
+            CO_OCCURRENCE_INDEX: codecs.encode(pickle.dumps(self.co_occurrence_index, pickle.HIGHEST_PROTOCOL),
+                                               "base64").decode(),
             DST_N_GRAM_DATA: self.dst_n_gram_data
         }
 
@@ -862,7 +904,8 @@ class Graph:
         dst_n_gram_data = data[DST_N_GRAM_DATA]
         graph = Graph()
         graph.words = {key: Word.from_json(item) for key, item in word_jsons.items()}
-        relations = {key: Relation.get_class(item[TYPE]).from_json(item, graph.get_node_by_id) for key, item in relation_jsons.items()}
+        relations = {key: Relation.get_class(item[TYPE]).from_json(item, graph.get_node_by_id) for key, item in
+                     relation_jsons.items()}
         graph.relations = relations
         graph.co_occurrence_index = co_occurrence_index
         graph.dst_n_gram_data = dst_n_gram_data
@@ -896,7 +939,7 @@ class Path:
         if self.dst is not None:
             if self.nodes[-1] == self.dst:
                 return True
-            if self.nodes[-1].has_next_word(self.dst) and (self.min_length is None or len(self) >= self.min_length)\
+            if self.nodes[-1].has_next_word(self.dst) and (self.min_length is None or len(self) >= self.min_length) \
                     and (self.max_length is None or len(self) <= self.max_length):
                 self.nodes.append(self.dst)
                 return True
@@ -1052,7 +1095,8 @@ class Path:
     def get_align_score(self, words: List[Word]):
         scores = []
         for node in self.nodes:
-            scores.append(max(max(node.get_co_occurrence_prop(word), word.get_translation_prop(node)) for word in words))
+            scores.append(
+                max(max(node.get_co_occurrence_prop(word), word.get_translation_prop(node)) for word in words))
         score = sum(scores) / len(scores)
         # print("PATH SCORE", self, score)
         return score
@@ -1258,7 +1302,7 @@ class Sentence:
     def get_chunk(self, from_index: int, to_index: int):
         if from_index > to_index:
             return
-        words = [w for w in self.words if from_index <= w.begin_index and w.end_index <= to_index]
+        words = [w for w in self.words if from_index < w.begin_index and w.end_index < to_index]
         if len(words) > 0:
             return Chunk(words)
 
@@ -1283,7 +1327,7 @@ class Sentence:
         words = self.words
         for i in range(1, 4):
             for j in range(len(words) - i + 1):
-                output.append(SentCombineWord(words[j:j+i]))
+                output.append(SentCombineWord(words[j:j + i]))
         return output
 
     @words.setter
@@ -1320,8 +1364,25 @@ class Sentence:
     def mapped_words(self):
         return self.words
 
-    def update_mapped_words(self):
-        pass
+    def update_mapped_words_list(self):
+        multi_translated_list = []
+        for word in self.words:
+            if '@' not in word.text:
+                myList = []
+                # key is word.text
+                for node in word.out_relations.values():
+                    if node.type == 'TRANSLATE':
+                        myList.append(node.dst.text)
+                        word.dst_word = node.dst.text
+                        for info in self.info:
+                            if info['text'] == word.text:
+                                info['mapped_word'] = node.dst.text
+                
+                if len(myList) > 1:                    
+                    multi_translated_list.append(((word.text,word.dst_word), myList))
+            
+        return multi_translated_list
+
 
     @staticmethod
     def from_paths(paths: List[Path]):
@@ -1424,17 +1485,19 @@ class Chunk(Sentence):
 
 
 class TranslationGraph(Graph):
-    def __init__(self, src_sent: Sentence, dst_sent: Sentence = None):
+    def __init__(self, src_sent: Sentence, dst_sent: Sentence = None, check_valid_anchor=None):
         super(TranslationGraph, self).__init__()
         self.src_sent = src_sent
         self.dst_sent = dst_sent
         self.load_words(src_sent)
         self.load_words(dst_sent)
         self._co_occurrence_relations = None
+        self.check_valid_anchor = (lambda x: True) if check_valid_anchor is None else check_valid_anchor
 
     def update_src_sentence(self):
         if self.src_sent is not None:
-            self.src_sent.update_mapped_words()
+            multi_list = self.src_sent.update_mapped_words_list() # Update mapping word in here
+            return multi_list
 
     @staticmethod
     def update_sentence_relation(relation: Relation):
@@ -1531,7 +1594,8 @@ class TranslationGraph(Graph):
 
     @property
     def mapping_relations(self) -> List[MappingRelation]:
-        output = [r for w in self.src_sent for r in w.get_relation_by_type(RelationTypes.MAPPING)]
+        output = [r for w in self.src_sent for r in w.get_relation_by_type(RelationTypes.MAPPING)
+                  if self.check_valid_anchor(w)]
         return output
 
     @property
@@ -1560,20 +1624,77 @@ class TranslationGraph(Graph):
             output.append([src_set, dst_set])
         return output
 
+    @staticmethod
+    def norm_chunk_pair(src_chunk: Chunk, dst_chunk: Chunk):
+        print(src_chunk.text, "______", dst_chunk.text)
+        relations = []
+        for word in src_chunk.words:
+            word_mapping_relations = word.get_relation_by_type(RelationTypes.MAPPING)
+            if len(word_mapping_relations) == 0:
+                continue
+            relations += word_mapping_relations
+        if len(relations) == 0:
+            return None, None
+
+        src_start = min([r.src.begin_index for r in relations])
+        src_end = max([r.src.end_index for r in relations])
+
+        dst_start = min([r.dst.begin_index for r in relations])
+        dst_end = max([r.dst.end_index for r in relations])
+
+        _src_chunk = src_chunk.get_chunk(src_start, src_end)
+        _dst_chunk = dst_chunk.get_chunk(dst_start, dst_end)
+        return _src_chunk, _dst_chunk
+
+    def find_continuous_mapping(self, src_chunk: Chunk, dst_chunk: Chunk):
+        chunks = []
+        relations = []
+        for word in src_chunk.words:
+            word_mapping_relations = word.get_relation_by_type(RelationTypes.MAPPING)
+            if len(word_mapping_relations) == 0:
+                continue
+            relations += word_mapping_relations
+
+        relations.sort(key=lambda item: item.src.begin_index)
+        for r in relations:
+            if len(chunks) == 0:
+                chunks.append([r])
+            else:
+                last_chunk: List = chunks[-1]
+                last_relation = last_chunk[-1]
+                if r.src.begin_index == last_relation.src.end_index + 1:
+                    last_chunk.append(r)
+                elif r.src.begin_index > last_relation.src.end_index + 1:
+                    chunks.append([r])
+        chunks = [item for item in chunks if len(item) > 1]
+        output_chunks = []
+        for chunk_relations in chunks:
+            src_start = min([r.src.begin_index for r in chunk_relations])
+            src_end = max([r.src.end_index for r in chunk_relations])
+
+            dst_start = min([r.dst.begin_index for r in chunk_relations])
+            dst_end = max([r.dst.end_index for r in chunk_relations])
+
+            _src_chunk = src_chunk.get_chunk(src_start, src_end)
+            _dst_chunk = dst_chunk.get_chunk(dst_start, dst_end)
+            output_chunks.append((_src_chunk, _dst_chunk))
+        return output_chunks
+
     @property
     def mapped_chunks(self) -> List[Tuple[Chunk, Chunk]]:
         relations = self.mapping_relations
         chunks = []
         n_chunks = len(relations) + 1
         for i in range(n_chunks):
-            if i-1 < 0:
+            if i - 1 < 0:
                 src_start = 0
             else:
-                src_start = relations[i-1].src.begin_index + 1
-            if i-1 < 0:
+                # src_start = relations[i-1].src.begin_index + 1
+                src_start = relations[i - 1].src.end_index + 1
+            if i - 1 < 0:
                 dst_start = 0
             else:
-                dst_start = relations[i-1].dst.end_index + 1
+                dst_start = relations[i - 1].dst.end_index + 1
             if i >= len(relations):
                 dst_end = self.dst_sent.end_index
             else:
@@ -1581,13 +1702,27 @@ class TranslationGraph(Graph):
             if i >= len(relations):
                 src_end = self.src_sent.end_index
             else:
-                src_end = relations[i].src.end_index - 1
+                # src_end = relations[i].src.end_index - 1
+                src_end = relations[i].src.begin_index - 1
 
             src_chunk = self.src_sent.get_chunk(src_start, src_end)
             dst_chunk = self.dst_sent.get_chunk(dst_start, dst_end)
             if src_chunk is None or dst_chunk is None:
                 continue
             chunks.append((src_chunk, dst_chunk))
+            src_chunk, dst_chunk = self.norm_chunk_pair(src_chunk, dst_chunk)
+            if src_chunk is None or dst_chunk is None:
+                continue
+            chunks.append((src_chunk, dst_chunk))
+            # _src_chunk, _dst_chunk = self.norm_chunk_pair(src_chunk, dst_chunk)
+            # if _src_chunk is not None and _dst_chunk is not None:
+            #     chunks.append((_src_chunk, _dst_chunk))
+            extra_chunks = self.find_continuous_mapping(src_chunk, dst_chunk)
+            chunks += extra_chunks
+        chunk_dict = {
+            src_chunk.text: (src_chunk, dst_chunk) for (src_chunk, dst_chunk) in chunks
+        }
+        chunks = list(chunk_dict.values())
         return chunks
 
     def get_candidate(self, words):
@@ -1615,7 +1750,8 @@ class TranslationGraph(Graph):
         candidates = [item["node"] for item in candidates]
         return candidates
 
-    def extract_path(self, from_node: Word, to_node: Word, candidates: List[Word], chunk_words: List[Word], k: int = None,
+    def extract_path(self, from_node: Word, to_node: Word, candidates: List[Word], chunk_words: List[Word],
+                     k: int = None,
                      max_length=None, min_length=None) -> List[Path]:
         s = time.time()
         k = 5 if k is None else k
@@ -1747,7 +1883,7 @@ class TranslationGraph(Graph):
                 return []
 
     def extract_path_(self, from_node: Word, to_node: Word, candidates: List[Word], chunk: Chunk, k: int = None,
-                     max_length=None, min_length=None) -> List[Path]:
+                      max_length=None, min_length=None) -> List[Path]:
         max_length = max_length if max_length is not None else 10
         # first_candidates = Path.get_candidates(candidates, from_node, toward=True)
         # last_candidates = Path.get_candidates(candidates, to_node, toward=False)
@@ -1790,7 +1926,8 @@ class TranslationGraph(Graph):
                 candidate_mapping[candidate.id]["score"].append(score)
 
         for candidate_id in candidate_mapping:
-            candidate_mapping[candidate_id]["score"] = sum(candidate_mapping[candidate_id]["score"]) / len(candidate_sets)
+            candidate_mapping[candidate_id]["score"] = sum(candidate_mapping[candidate_id]["score"]) / len(
+                candidate_sets)
 
         candidates = [candidate_mapping[candidate_id]["item"] for candidate_id in candidate_mapping]
 
@@ -1861,7 +1998,8 @@ class TranslationGraph(Graph):
 
             return None
 
-        def get_next_word(from_node: SentCombineWord, end_node: SentCombineWord, candidates: [List[SentCombineWord]], path=None):
+        def get_next_word(from_node: SentCombineWord, end_node: SentCombineWord, candidates: [List[SentCombineWord]],
+                          path=None):
             if path is None:
                 path = [from_node]
             # print("LAST ", path[-1].last_syllable.text, " END ", end_node.first_syllable.text, [c.text for c in candidates])
@@ -1875,7 +2013,8 @@ class TranslationGraph(Graph):
                 # print(path[-1].last_syllable.text, c.first_syllable.text, path[-1].last_syllable.has_next_word(c.first_syllable))
                 if path[-1].last_syllable.has_next_word(c.first_syllable):
                     child_path = [*path, c]
-                    all_paths += get_next_word(from_node, end_node, [item for item in candidates if item != c], path=child_path)
+                    all_paths += get_next_word(from_node, end_node, [item for item in candidates if item != c],
+                                               path=child_path)
             return [all_paths]
 
         _pre_is_ner = is_ner_group(start_words)
@@ -1936,4 +2075,3 @@ class TranslationGraph(Graph):
                 paths = [item[1:] for item in paths]
                 output = paths
         return output
-
